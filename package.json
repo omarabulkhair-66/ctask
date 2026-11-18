@@ -1,0 +1,27 @@
+{
+  "name": "ctask",
+  "version": "0.4.0",
+  "description": "Persistent task engine for Claude: tasks, steps, reminders and automations across sessions and projects",
+  "type": "module",
+  "bin": {
+    "ctask": "bin/ctask"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/omarabulkhair-66/ctask.git"
+  },
+  "files": [
+    "bin",
+    "src",
+    "hooks",
+    "skills",
+    ".claude-plugin"
+  ]
+}

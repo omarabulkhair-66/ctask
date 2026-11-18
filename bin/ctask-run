@@ -1,0 +1,10 @@
+#!/bin/sh
+# Launcher for hooks and the MCP server: they can start with a bare PATH (app launched from Finder),
+# so look for node in the usual places. If none is found, exit quietly rather than break the session.
+here=$(cd "$(dirname "$0")" && pwd)
+for n in "$(command -v node 2>/dev/null)" \
+         "$HOME/Library/Application Support/Flock/bin/node" \
+         /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.volta/bin/node"; do
+  [ -n "$n" ] && [ -x "$n" ] && exec "$n" "$here/ctask" "$@"
+done
+exit 0

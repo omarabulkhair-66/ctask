@@ -1,0 +1,13 @@
+{
+  "name": "ctask",
+  "owner": {
+    "name": "omarabulkhair-66"
+  },
+  "plugins": [
+    {
+      "name": "ctask",
+      "source": "./",
+      "description": "Persistent task engine for Claude Code with enforcing hooks, a skill and an MCP server"
+    }
+  ]
+}

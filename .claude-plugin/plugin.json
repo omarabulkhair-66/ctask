@@ -1,0 +1,27 @@
+{
+  "name": "ctask",
+  "version": "0.4.0",
+  "description": "Persistent task engine for Claude: tasks, steps, reminders and automations across sessions and projects. Hooks keep Claude using it.",
+  "author": {
+    "name": "omarabulkhair-66",
+    "url": "https://github.com/omarabulkhair-66"
+  },
+  "mcpServers": {
+    "ctask": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/ctask-run",
+      "args": [
+        "mcp"
+      ]
+    }
+  },
+  "homepage": "https://github.com/omarabulkhair-66/ctask",
+  "repository": "https://github.com/omarabulkhair-66/ctask",
+  "license": "MIT",
+  "keywords": [
+    "tasks",
+    "reminders",
+    "automation",
+    "hooks",
+    "mcp"
+  ]
+}
