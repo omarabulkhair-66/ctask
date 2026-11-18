@@ -14,6 +14,7 @@ export function taskLine(t, { showProject = false } = {}) {
   }
   if (t.recur) meta.push(`every ${t.recur}`);
   if (t.parent_id) meta.push(`parent #${t.parent_id}`);
+  if (t.waiting_on) meta.push(`after ${String(t.waiting_on).split(',').map((i) => `#${i}`).join(', ')}`);
   if (t.tags) meta.push(`tags: ${t.tags}`);
   if (t.archived_at) meta.push('archived');
   if (showProject) meta.push(projectName(t.project));
@@ -24,7 +25,7 @@ export function taskList(tasks, opts) {
   return tasks.length ? tasks.map((t) => taskLine(t, opts)).join('\n') : '(no tasks)';
 }
 
-export function taskDetailText({ task: t, children, events }) {
+export function taskDetailText({ task: t, children, events, links = [], deps = { after: [], before: [] } }) {
   const out = [taskLine(t)];
   out.push(`project: ${t.project}`);
   out.push(`session: ${t.session_id ?? '-'}${t.kind === 'automation' ? ` (run: ${t.resume ? 'resume session' : 'fresh'})` : ''}`);
@@ -32,7 +33,17 @@ export function taskDetailText({ task: t, children, events }) {
   if (t.last_run) out.push(`last run: ${fmtLocal(t.last_run)} · runs: ${t.run_count}`);
   if (t.body) out.push('', 'BODY:', t.body);
   if (t.instructions) out.push('', 'INSTRUCTIONS:', t.instructions);
+  if (t.accept) out.push('', 'ACCEPTANCE (must be true before done):', t.accept);
+  if (deps.after.length) out.push('', 'AFTER (must be closed first):', ...deps.after.map((d) => `  ${taskLine(d)}`));
+  if (deps.before.length) out.push('', 'UNBLOCKS:', ...deps.before.map((d) => `  ${taskLine(d)}`));
   if (children.length) out.push('', 'STEPS:', ...children.map((c) => `  ${taskLine(c)}`));
+  if (links.length) {
+    const of = (k) => links.filter((l) => l.kind === k).map((l) => l.ref);
+    out.push('', 'LINKS:');
+    for (const k of ['branch', 'commit', 'pr']) if (of(k).length) out.push(`  ${k}: ${of(k).join(', ')}`);
+    const files = of('file');
+    if (files.length) out.push(`  files (${files.length}): ${files.slice(-25).join(', ')}${files.length > 25 ? ' …' : ''}`);
+  }
   if (events.length) {
     out.push('', 'LOG:');
     for (const e of events) out.push(`  ${fmtLocal(e.at)} ${e.type}${e.note ? `: ${e.note}` : ''}`);
@@ -64,4 +75,26 @@ export function pageFooter(p) {
 export function pageText(p, opts) {
   const footer = pageFooter(p);
   return p.total === 0 ? '(no tasks)' : [p.tasks.length ? taskList(p.tasks, opts) : null, footer].filter(Boolean).join('\n');
+}
+
+export function reviewText(r, { showProject = false } = {}) {
+  const out = [];
+  const section = (label, items) => {
+    if (items.length) out.push(`${label} (${items.length}):`, ...items.map((t) => `  ${taskLine(t, { showProject })}`));
+  };
+  section('DUE', r.due);
+  section('WAITING ON YOU', r.waiting);
+  section('BLOCKED', r.blocked);
+  section(`STALLED (in progress, untouched for ${r.staleDays}+ days)`, r.stale);
+  out.push(`Done in the last 24h: ${r.doneToday}`);
+  return out.length === 1 ? `Nothing needs attention. ${out[0]}` : out.join('\n');
+}
+
+export function playbookText(pb) {
+  const out = [`${pb.name} — ${pb.title}`];
+  if (pb.body) out.push('', 'BODY:', pb.body);
+  if (pb.instructions) out.push('', 'INSTRUCTIONS:', pb.instructions);
+  if (pb.accept) out.push('', 'ACCEPTANCE:', pb.accept);
+  if (pb.steps.length) out.push('', 'STEPS (each waits on the one before):', ...pb.steps.map((s, i) => `  ${i + 1}. ${s.title}${s.instructions ? ` — ${s.instructions}` : ''}`));
+  return out.join('\n');
 }

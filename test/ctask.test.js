@@ -9,7 +9,7 @@ import { parseEvery, parseWhen } from '../src/time.js';
 
 const bin = fileURLToPath(new URL('../bin/ctask', import.meta.url));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctask-test-'));
-const env = { ...process.env, CTASK_DB: path.join(dir, 'db.sqlite'), CTASK_SESSION_ID: 'sess-test', CTASK_DAEMON: 'off', CTASK_NOTIFY: 'off', CTASK_ARCHIVE_AFTER: 'off' };
+const env = { ...process.env, CTASK_DB: path.join(dir, 'db.sqlite'), CTASK_SESSION_ID: 'sess-test', CTASK_DAEMON: 'off', CTASK_NOTIFY: 'off', CTASK_ARCHIVE_AFTER: 'off', CTASK_REVIEW_AT: 'off' };
 const run = (args, input) => execFileSync(process.execPath, [bin, ...args], { env, cwd: dir, input, encoding: 'utf8' });
 const json = (args) => JSON.parse(run([...args, '--json']));
 
@@ -108,7 +108,7 @@ test('archiving hides old closed tasks without deleting them', async () => {
   const recent = json(['add', 'Recent xylophone job']);
   const parent = json(['add', 'Open xylophone parent']);
   const step = json(['add', 'Old xylophone step', '--parent', String(parent.id)]);
-  for (const t of [old, recent, step]) run(['done', String(t.id)]);
+  for (const t of [old, recent, step]) run(['done', String(t.id), '--note', 'checked']);
   age(old.id, 45);
   age(step.id, 45);
 
@@ -192,5 +192,105 @@ test('handoff is captured from the transcript and shown to the next session', ()
   const next = JSON.parse(hook('session-start', 'sess-after')).hookSpecificOutput.additionalContext;
   assert.match(next, new RegExp(`HANDOFF for #${t.id}[\\s\\S]*third fails on a foreign key`));
   assert.equal(hook('session-end', 'sess-none', { transcript_path: path.join(dir, 'missing.jsonl') }), '');
-  run(['done', String(t.id)]);
+  run(['done', String(t.id), '--note', 'migrated', '--force']);
+});
+
+const fails = (args, re, extraEnv) =>
+  assert.throws(() => execFileSync(process.execPath, [bin, ...args], { env: { ...env, ...extraEnv }, cwd: dir, encoding: 'utf8', stdio: 'pipe' }), re);
+const as = (session, args) => execFileSync(process.execPath, [bin, ...args], { env: { ...env, CTASK_SESSION_ID: session }, cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+
+test('done needs evidence; acceptance criteria are shown', () => {
+  const t = json(['add', 'Fix login', '--accept', 'login test passes']);
+  fails(['done', String(t.id)], /needs evidence[\s\S]*login test passes/);
+  assert.equal(json(['done', String(t.id), '--note', 'ran login test: green']).status, 'done');
+  const r = json(['add', 'Call back', '--next', 'now']); // reminders are exempt
+  assert.equal(json(['done', String(r.id)]).status, 'done');
+  const f = json(['add', 'Skip it']);
+  assert.equal(json(['done', String(f.id), '--force']).status, 'done');
+});
+
+test('dependencies order work and report what they unblock', () => {
+  const a = json(['add', 'Dep schema']);
+  const b = json(['add', 'Dep api', '--after', String(a.id)]);
+  assert.equal(b.waiting_on, String(a.id));
+  assert.match(run(['list']), new RegExp(`#${b.id} .*after #${a.id}`));
+  assert.ok(!json(['next', '--limit', '50']).some((t) => t.id === b.id));
+  fails(['start', String(b.id)], /waits on/);
+  fails(['update', String(a.id), '--after', String(b.id)], /cycle/);
+  assert.match(run(['done', String(a.id), '--note', 'schema applied']), new RegExp(`unblocked: #${b.id} Dep api`));
+  assert.equal(json(['start', String(b.id)]).status, 'in_progress');
+  run(['done', String(b.id), '--note', 'api ok']);
+});
+
+test('a task in progress in an active session cannot be taken by another', () => {
+  run(['hook', 'user-prompt'], JSON.stringify({ session_id: 'sess-A', cwd: dir }));
+  const t = JSON.parse(as('sess-A', ['add', 'Shared work', '--start', '--json']));
+  assert.throws(() => as('sess-B', ['start', String(t.id)]), /in progress in another session/);
+  assert.equal(JSON.parse(as('sess-B', ['start', String(t.id), '--force', '--json'])).session_id, 'sess-B');
+  as('sess-B', ['cancel', String(t.id)]);
+});
+
+test('project memory is stored, searched and shown at session start', () => {
+  const m = json(['remember', 'Never edit generated/ by hand, run make gen', '--kind', 'rule']);
+  run(['remember', 'Chose Postgres over MySQL for JSONB', '--kind', 'decision']);
+  assert.equal(json(['memory', 'postgres']).length, 1);
+  assert.equal(json(['memory'])[0].id, m.id); // rules come first
+  fails(['remember', 'x', '--kind', 'nope'], /bad kind/);
+  const ctx = JSON.parse(run(['hook', 'session-start'], JSON.stringify({ session_id: 'sess-mem', cwd: dir }))).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /PROJECT MEMORY \(2\)[\s\S]*\[rule\] Never edit generated/);
+  run(['forget', `m${m.id}`]);
+  assert.equal(json(['memory']).length, 1);
+});
+
+test('files edited in a turn are linked to the task and found by why', () => {
+  const transcript = path.join(dir, 'turn.jsonl');
+  const line = (o) => JSON.stringify(o) + '\n';
+  const edit = (p) => line({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: path.join(fs.realpathSync(dir), p) } }] } });
+  fs.writeFileSync(transcript, line({ type: 'user', message: { content: 'earlier' } }) + edit('old/untouched.js') + line({ type: 'user', message: { content: 'now fix auth' } }) + edit('src/auth/login.js') + edit('src/auth/session.js'));
+  const t = JSON.parse(as('sess-link', ['add', 'Fix auth', '--start', '--json']));
+  run(['hook', 'user-prompt'], JSON.stringify({ session_id: 'sess-link', cwd: dir }));
+  run(['note', String(t.id), 'working']);
+  assert.equal(run(['hook', 'stop'], JSON.stringify({ session_id: 'sess-link', cwd: dir, transcript_path: transcript })), '');
+  const files = json(['show', String(t.id)]).links.filter((l) => l.kind === 'file').map((l) => l.ref);
+  assert.deepEqual(files.sort(), ['src/auth/login.js', 'src/auth/session.js']);
+  assert.equal(json(['why', 'src/auth/login.js'])[0].id, t.id);
+  assert.equal(json(['why', 'login.js'])[0].id, t.id); // suffix match
+  assert.equal(json(['why', 'old/untouched.js']).length, 0);
+  run(['link', String(t.id), '--pr', 'https://example.test/pr/1', '--commit', 'abc123']);
+  assert.match(run(['show', String(t.id)]), /LINKS:[\s\S]*commit: abc123[\s\S]*pr: https/);
+  as('sess-link', ['done', String(t.id), '--note', 'auth tests pass']);
+});
+
+test('playbooks save a recipe and replay it as ordered steps', () => {
+  const src = json(['add', 'Release', '--instructions', 'follow the checklist', '--accept', 'tag pushed']);
+  for (const s of ['Bump version', 'Run tests', 'Tag and push']) run(['add', s, '--parent', String(src.id)]);
+  assert.match(run(['playbook', 'save', 'release', '--from', String(src.id)]), /saved playbook release/);
+  assert.match(run(['playbook', 'list']), /release — Release \(3 steps\)/);
+  const res = json(['playbook', 'run', 'release', 'v2.0']);
+  assert.equal(res.task.title, 'Release: v2.0');
+  assert.equal(res.task.accept, 'tag pushed');
+  assert.deepEqual(res.steps.map((s) => s.title), ['Bump version', 'Run tests', 'Tag and push']);
+  assert.equal(res.steps[0].waiting_on, null);
+  assert.equal(res.steps[2].waiting_on, String(res.steps[1].id));
+  run(['playbook', 'save', 'triage', '--title', 'Bug triage', '--steps', 'Reproduce; Find cause; Fix']);
+  assert.equal(json(['playbook', 'show', 'triage']).steps.length, 3);
+  const ctx = JSON.parse(run(['hook', 'session-start'], JSON.stringify({ session_id: 'sess-pb', cwd: dir }))).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /PLAYBOOKS: release, triage/);
+  run(['playbook', 'rm', 'triage']);
+  fails(['playbook', 'run', 'triage'], /not found/);
+  fails(['playbook', 'save', 'Bad Name!', '--steps', 'a'], /name must be/);
+});
+
+test('review lists what needs attention', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const stalled = json(['add', 'Stalled work', '--start']);
+  const waiting = json(['add', 'Needs a key']);
+  run(['wait', String(waiting.id), '--note', 'need API key']);
+  const db = new DatabaseSync(env.CTASK_DB);
+  db.prepare('UPDATE tasks SET updated_at=? WHERE id=?').run(new Date(Date.now() - 5 * 86400e3).toISOString(), stalled.id);
+  db.close();
+  const r = json(['review']);
+  assert.ok(r.stale.some((t) => t.id === stalled.id));
+  assert.ok(r.waiting.some((t) => t.id === waiting.id));
+  assert.match(run(['review']), /WAITING ON YOU[\s\S]*STALLED/);
 });

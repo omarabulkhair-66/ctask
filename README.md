@@ -60,7 +60,7 @@ A connector alone gives Claude tools it can forget. The hooks are what make it s
 | Stop | Blocks the end of a turn once if the session has an `in_progress` task it did not touch that turn. |
 | PreCompact, SessionEnd | Capture a handoff note from the transcript before context is lost. |
 
-The skill (`skills/ctask/SKILL.md`) teaches Claude when to write and when to read. The MCP server exposes the same engine as tools (`task_add`, `task_list`, `task_get`, `task_update`, `task_next`) for surfaces without a shell.
+The skill (`skills/ctask/SKILL.md`) teaches Claude when to write and when to read. The MCP server exposes the same engine as tools (`task_add`, `task_list`, `task_get`, `task_update`, `task_next`, `memory_add`, `memory_list`) for surfaces without a shell.
 
 ## Handoff notes
 
@@ -68,11 +68,36 @@ Long sessions get compacted and closed sessions forget. Just before either happe
 
 The next SessionStart shows it: to the same session after compaction or resume, or to a new session in the same project (up to 14 days later). Claude can also write its own with `ctask handoff <id> "state / what failed / next step"`, which takes priority on that task. Handoffs contain excerpts of your conversation and stay in the local database.
 
+## Project memory
+
+Tasks end; knowledge should not. `ctask remember "Never edit generated/ by hand, run make gen" --kind rule` stores a rule, decision, gotcha or fact for the project (`--global` for every project). Every session that starts there is shown the list, rules first, so you stop explaining the same thing twice. `ctask memory [words]` searches it and `ctask forget m3` removes an entry.
+
+## Evidence before done
+
+The common failure of an agent is saying "done" when it is not. A task or step cannot be marked done without `--note` saying what was run or checked, and `--accept "criteria"` records up front what done means; the criteria are printed if Claude tries to close the task without evidence. Reminders and automations are exempt, and `--force` overrides.
+
+## Dependencies and parallel sessions
+
+`ctask add "Deploy" --after 14,15` makes a task wait. It cannot be started until what it waits on is closed, `ctask next` only offers ready work, and closing a task prints what it unblocked. Cycles are rejected. A task that is in progress in a session active in the last 30 minutes cannot be started by another session, so several sessions can work one project without colliding.
+
+## Code links
+
+At the end of every turn the files Claude edited are attached to the task it was working on, along with the git branch and commit when a task is started or finished. `ctask why src/auth/login.js` then answers "which tasks touched this file, and why". `ctask link <id> --pr URL` adds links by hand.
+
+## Playbooks
+
+A playbook is a saved recipe for work that repeats: a task with ordered steps, instructions and acceptance criteria. Save one from a task that went well with `ctask playbook save release --from 42`, or write it directly with `--title` and `--steps "Bump version; Run tests; Tag and push"`. `ctask playbook run release v2.0 --start` creates the task and its steps, each waiting on the one before. Sessions are shown the playbook names at start, so Claude reaches for them on matching work.
+
+## Review
+
+`ctask review` (`--all` for every project) lists what needs attention: due, waiting on you, blocked, and work in progress that nobody has touched for three days. Once a day the background checker sends the same summary as a notification, at or after `CTASK_REVIEW_AT` (default `09:00`, `off` to disable), and stays quiet when nothing needs you.
+
 ## Commands
 
 ```text
 Create   ctask add <title> [--body T] [--instructions T] [--kind task|step|reminder|automation]
                            [--priority 1|2|3] [--parent ID] [--tags a,b] [--next WHEN] [--every 30m|2h|1d|1w] [--start]
+                           [--accept CRITERIA] [--after ID,ID]
 Work     ctask start|done|block|wait|cancel|reopen <id> [--note T]
          ctask note <id> <text>
          ctask update <id> [--title --body --instructions --status --priority --next --every ...]
@@ -81,6 +106,10 @@ Look     ctask list [--all] [--status s1,s2] [--kind K] [--due] [--mine] [--clos
          ctask search <words> [--all] [--archived]
          ctask show <id>
          ctask next | due | projects | context
+Know     ctask remember <text> [--kind rule|decision|gotcha|fact] [--global] | memory [words] | forget <mID>
+         ctask link <id> [--file a,b] [--commit SHA] [--branch NAME] [--pr URL] | why <file>
+         ctask playbook save|run|list|show|rm <name> ...
+         ctask review [--all] [--stale DAYS]
 Archive  ctask archive [<id>] [--older 30d] [--all] [--dry-run]
          ctask unarchive <id>
 ```
@@ -116,6 +145,7 @@ Archived tasks are hidden from lists and search but never deleted. `--archived` 
 | `CTASK_DAEMON=off` | Do not install the background checker. |
 | `CTASK_NOTIFY=off` | No macOS notifications. |
 | `CTASK_ARCHIVE_AFTER` | Age at which closed tasks are archived, such as `14d`. Default `30d`; `off` disables it. |
+| `CTASK_REVIEW_AT` | Time of the daily review notification. Default `09:00`; `off` disables it. |
 | `CTASK_CLAUDE_BIN` | The `claude` executable used for automations. |
 
 ## Data and privacy

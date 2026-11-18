@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { open } from './db.js';
+import { linkGit, linksFor } from './links.js';
 import { parseEvery, parseWhen } from './time.js';
 
 export const OPEN = ['todo', 'in_progress', 'blocked', 'waiting'];
@@ -8,6 +9,12 @@ export const STATUSES = [...OPEN, 'done', 'cancelled'];
 export const KINDS = ['task', 'step', 'reminder', 'automation'];
 
 const nowIso = () => new Date().toISOString();
+
+const UNMET = `SELECT 1 FROM deps d JOIN tasks x ON x.id=d.depends_on
+               WHERE d.task_id=tasks.id AND x.status NOT IN ('done','cancelled')`;
+// Every task row carries `waiting_on`: the ids it depends on that are not closed yet (or null).
+const COLS = `tasks.*, (SELECT group_concat(d.depends_on) FROM deps d JOIN tasks x ON x.id=d.depends_on
+               WHERE d.task_id=tasks.id AND x.status NOT IN ('done','cancelled')) AS waiting_on`;
 const qs = (arr) => arr.map(() => '?').join(',');
 
 /** Project identity = git root above cwd, else cwd itself. */
@@ -74,7 +81,7 @@ function parsePriority(p) {
 
 export function getTask(id) {
   const n = Number(String(id).replace(/^#/, ''));
-  const t = Number.isInteger(n) ? open().prepare('SELECT * FROM tasks WHERE id=?').get(n) : undefined;
+  const t = Number.isInteger(n) ? open().prepare(`SELECT ${COLS} FROM tasks WHERE id=?`).get(n) : undefined;
   if (!t) throw new Error(`task ${id} not found`);
   return t;
 }
@@ -109,8 +116,8 @@ export function addTask(input) {
   const { lastInsertRowid } = db
     .prepare(
       `INSERT INTO tasks(project, session_id, parent_id, kind, title, body, instructions, status, priority,
-                         tags, next_run, recur, resume, created_at, updated_at)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                         tags, next_run, recur, resume, accept, created_at, updated_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       project,
@@ -126,16 +133,18 @@ export function addTask(input) {
       nextRun,
       recur,
       input.resume ? 1 : 0,
+      input.accept ?? null,
       now,
       now,
     );
   const id = Number(lastInsertRowid);
+  if (input.after != null) setDeps(id, input.after);
   logEvent(id, 'created', null, session);
   return getTask(id);
 }
 
 /** Patch plain fields. `next`/`every` accept "none" to clear. */
-export function updateTask(id, patch, { session, note } = {}) {
+export function updateTask(id, patch, { session, note, force } = {}) {
   const task = getTask(id);
   const set = {};
   if (patch.title != null) set.title = String(patch.title).trim();
@@ -144,6 +153,8 @@ export function updateTask(id, patch, { session, note } = {}) {
   if (patch.kind != null) set.kind = check(patch.kind, KINDS, 'kind');
   if (patch.priority != null) set.priority = parsePriority(patch.priority);
   if (patch.tags != null) set.tags = patch.tags;
+  if (patch.accept != null) set.accept = patch.accept === 'none' ? null : patch.accept;
+  if (patch.after != null) setDeps(task.id, patch.after);
   if (patch.session != null) set.session_id = patch.session;
   if (patch.resume != null) set.resume = patch.resume ? 1 : 0;
   if (patch.parent != null) set.parent_id = patch.parent === 'none' ? null : getTask(patch.parent).id;
@@ -159,7 +170,7 @@ export function updateTask(id, patch, { session, note } = {}) {
       .run(...keys.map((k) => set[k]), nowIso(), task.id);
     logEvent(task.id, 'update', keys.join(', '), sid);
   }
-  if (patch.status != null) setStatus(task.id, patch.status, { session: sid, note });
+  if (patch.status != null) setStatus(task.id, patch.status, { session: sid, note, force });
   else if (note) addNote(task.id, note, { session: sid });
   return getTask(task.id);
 }
@@ -168,12 +179,33 @@ export function updateTask(id, patch, { session, note } = {}) {
  * Status transition. Marking a recurring task done reschedules it (back to todo, next_run += interval)
  * instead of closing it. Starting a task claims it for the current session.
  */
-export function setStatus(id, status, { session, note } = {}) {
+export function setStatus(id, status, { session, note, force = false } = {}) {
   check(status, STATUSES, 'status');
   const task = getTask(id);
   const db = open();
   const sid = session ?? currentSession(task.project);
   const now = nowIso();
+
+  if (!force && status === 'in_progress') {
+    if (task.waiting_on) {
+      throw new Error(`#${task.id} waits on ${ids(task.waiting_on)} — finish those first (or --force)`);
+    }
+    // Two sessions on one task step on each other: refuse while the owner is still active.
+    if (task.status === 'in_progress' && task.session_id && sid && task.session_id !== sid) {
+      const owner = getSession(task.session_id);
+      const mins = owner ? Math.round((Date.now() - new Date(owner.last_seen).getTime()) / 60000) : Infinity;
+      if (mins <= 30) {
+        throw new Error(`#${task.id} is in progress in another session (${task.session_id}, active ${mins}m ago) — pick another task, or --force to take it over`);
+      }
+    }
+  }
+  // "Done" has to say what was actually checked. Reminders and automations are exempt.
+  if (!force && status === 'done' && ['task', 'step'].includes(task.kind) && !String(note ?? '').trim()) {
+    throw new Error(
+      `#${task.id} needs evidence to be done: ctask done ${task.id} --note "what you ran or checked, and the result"` +
+        (task.accept ? `\nAcceptance criteria: ${task.accept}` : ''),
+    );
+  }
 
   if (status === 'done' && task.recur) {
     const next = new Date(Date.now() + parseEvery(task.recur) * 1000).toISOString();
@@ -194,6 +226,7 @@ export function setStatus(id, status, { session, note } = {}) {
      WHERE id=?`,
   ).run(status, now, closed ? now : null, closed ? 1 : 0, status, sid, sid, status, now, status, task.id);
   logEvent(task.id, 'status', `${task.status} -> ${status}${note ? ` — ${note}` : ''}`, sid);
+  if (status === 'done' || status === 'in_progress') linkGit(task.id, task.project);
   return getTask(task.id);
 }
 
@@ -283,7 +316,7 @@ export const DEFAULT_LIMIT = 50;
 export function listTasks(f = {}) {
   const { sql, args } = buildFilter(f);
   return open()
-    .prepare(`SELECT * FROM tasks ${sql} ORDER BY ${ORDER} LIMIT ? OFFSET ?`)
+    .prepare(`SELECT ${COLS} FROM tasks ${sql} ORDER BY ${ORDER} LIMIT ? OFFSET ?`)
     .all(...args, f.limit ?? DEFAULT_LIMIT, f.offset ?? 0);
 }
 
@@ -308,8 +341,10 @@ export function taskDetail(id, { events = 15 } = {}) {
   const db = open();
   return {
     task,
-    children: db.prepare(`SELECT * FROM tasks WHERE parent_id=? ORDER BY id`).all(task.id),
+    children: db.prepare(`SELECT ${COLS} FROM tasks WHERE parent_id=? ORDER BY id`).all(task.id),
     events: db.prepare('SELECT * FROM events WHERE task_id=? ORDER BY id DESC LIMIT ?').all(task.id, events).reverse(),
+    links: linksFor(task.id),
+    deps: depsOf(task.id),
   };
 }
 
@@ -324,8 +359,9 @@ export function nextTasks({ project, all = false, limit = 5 } = {}) {
   }
   return open()
     .prepare(
-      `SELECT * FROM tasks
+      `SELECT ${COLS} FROM tasks
        WHERE ${scope} status IN ('todo','in_progress') AND (next_run IS NULL OR next_run<=? OR status='in_progress')
+         AND NOT EXISTS (${UNMET})
        ORDER BY (next_run IS NOT NULL AND next_run<=?) DESC, status='in_progress' DESC, priority, id
        LIMIT ?`,
     )
@@ -354,7 +390,7 @@ export function staleInProgress(sessionId) {
   const s = getSession(sessionId);
   if (!s?.last_prompt_at) return [];
   return open()
-    .prepare(`SELECT * FROM tasks WHERE session_id=? AND status='in_progress' AND updated_at<? ORDER BY id`)
+    .prepare(`SELECT ${COLS} FROM tasks WHERE session_id=? AND status='in_progress' AND updated_at<? ORDER BY id`)
     .all(sessionId, s.last_prompt_at);
 }
 
@@ -376,7 +412,7 @@ export function archiveOld({ older = '30d', project, all = false, dryRun = false
     AND (parent_id IS NULL OR NOT EXISTS (
       SELECT 1 FROM tasks p WHERE p.id=tasks.parent_id AND p.status IN (${qs(OPEN)})))`;
   const db = open();
-  const rows = db.prepare(`SELECT * FROM tasks WHERE ${where} ORDER BY id`).all(...args, ...OPEN);
+  const rows = db.prepare(`SELECT ${COLS} FROM tasks WHERE ${where} ORDER BY id`).all(...args, ...OPEN);
   if (!dryRun && rows.length) {
     db.prepare(`UPDATE tasks SET archived_at=? WHERE ${where}`).run(nowIso(), ...args, ...OPEN);
   }
@@ -394,4 +430,46 @@ export function unarchiveTask(id) {
   const task = getTask(id);
   open().prepare('UPDATE tasks SET archived_at=NULL WHERE id=?').run(task.id);
   return getTask(task.id);
+}
+
+// ---------- dependencies ----------
+
+const ids = (csv) => String(csv).split(',').map((i) => `#${i}`).join(', ');
+
+/** Replace what a task waits on. `spec` is "3,4", [3, 4] or "none". */
+export function setDeps(id, spec) {
+  const task = getTask(id);
+  const db = open();
+  const wanted = spec === 'none' || spec === '' ? [] : [...new Set((Array.isArray(spec) ? spec : String(spec).split(',')).map((s) => getTask(String(s).trim()).id))];
+  const reaches = (from, target, seen = new Set()) => {
+    if (from === target) return true;
+    if (seen.has(from)) return false;
+    seen.add(from);
+    return db.prepare('SELECT depends_on FROM deps WHERE task_id=?').all(from).some((r) => reaches(r.depends_on, target, seen));
+  };
+  for (const dep of wanted) {
+    if (dep === task.id) throw new Error(`#${task.id} cannot depend on itself`);
+    if (reaches(dep, task.id)) throw new Error(`#${task.id} -> #${dep} would create a dependency cycle`);
+  }
+  db.prepare('DELETE FROM deps WHERE task_id=?').run(task.id);
+  for (const dep of wanted) db.prepare('INSERT INTO deps(task_id, depends_on) VALUES(?,?)').run(task.id, dep);
+  return getTask(task.id);
+}
+
+/** Open tasks that were waiting on `id` and are now free to start. */
+export function unblockedBy(id) {
+  return open()
+    .prepare(
+      `SELECT ${COLS} FROM tasks JOIN deps dd ON dd.task_id=tasks.id
+       WHERE dd.depends_on=? AND tasks.status IN (${qs(OPEN)}) AND NOT EXISTS (${UNMET}) ORDER BY tasks.id`,
+    )
+    .all(Number(id), ...OPEN);
+}
+
+export function depsOf(id) {
+  const db = open();
+  return {
+    after: db.prepare(`SELECT ${COLS} FROM tasks JOIN deps dd ON dd.depends_on=tasks.id WHERE dd.task_id=? ORDER BY tasks.id`).all(Number(id)),
+    before: db.prepare(`SELECT ${COLS} FROM tasks JOIN deps dd ON dd.task_id=tasks.id WHERE dd.depends_on=? ORDER BY tasks.id`).all(Number(id)),
+  };
 }

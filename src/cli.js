@@ -2,7 +2,11 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as core from './core.js';
 import { dbPath } from './db.js';
-import { pageText, projectsText, taskDetailText, taskLine, taskList } from './format.js';
+import { pageText, playbookText, projectsText, reviewText, taskDetailText, taskLine, taskList } from './format.js';
+import * as links from './links.js';
+import * as memory from './memory.js';
+import * as playbooks from './playbooks.js';
+import { review } from './review.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
@@ -11,9 +15,11 @@ const HELP = `ctask ${VERSION} — persistent task engine for Claude (tasks, ste
 Create
   ctask add <title> [--body T] [--instructions T] [--kind task|step|reminder|automation]
                     [--priority 1|2|3] [--parent ID] [--tags a,b] [--next WHEN] [--every 30m|2h|1d|1w]
+                    [--accept CRITERIA] [--after ID,ID]
                     [--start] [--resume] [--project DIR] [--session ID]
 Work
-  ctask start|done|block|wait|cancel|reopen <id> [--note T]
+  ctask start|done|block|wait|cancel|reopen <id> [--note T] [--force]
+                                done needs --note: what you ran or checked
   ctask note <id> <text>
   ctask handoff <id> <text>     where it stands, what failed, the next step (shown to the next session)
   ctask update <id> [--title --body --instructions --kind --priority --tags --parent --status
@@ -31,6 +37,19 @@ Look
   ctask due [--all]             items whose time has come
   ctask projects                open work across every project
   ctask context                 the digest injected at session start
+Memory     (project knowledge shown to every session)
+  ctask remember <text> [--kind rule|decision|gotcha|fact] [--global]
+  ctask memory [words] [--all] [--kind K]
+  ctask forget <mID>
+Code
+  ctask link <id> [--file a,b] [--commit SHA] [--branch NAME] [--pr URL]
+  ctask why <file> [--all]      tasks that touched a file
+Playbooks  (reusable recipes: a task with ordered steps)
+  ctask playbook save <name> --from <task id> | --title T --steps "a; b; c" [--instructions T] [--accept T]
+  ctask playbook run <name> [subject] [--start] [--parallel]
+  ctask playbook list | show <name> | rm <name>
+Review
+  ctask review [--all] [--stale DAYS]   due, waiting on you, blocked, stalled
 Automation
   ctask tick [--dry-run]        notify due reminders, run due automations with \`claude -p\`
   ctask daemon install|uninstall|status   background checker (the plugin installs it itself)
@@ -43,7 +62,7 @@ Statuses: todo, in_progress, blocked, waiting (on the user), done, cancelled.
 Add --json to add/list/show/next/due/projects for machine-readable output.
 Data: ${dbPath()}`;
 
-const BOOL = new Set(['archived', 'json', 'all', 'due', 'mine', 'closed', 'dry-run', 'help', 'start', 'resume']);
+const BOOL = new Set(['force', 'global', 'parallel', 'archived', 'json', 'all', 'due', 'mine', 'closed', 'dry-run', 'help', 'start', 'resume']);
 
 function parse(argv) {
   const pos = [];
@@ -90,8 +109,9 @@ function main(argv) {
   };
 
   if (cmd in STATUS_VERBS) {
-    const t = core.setStatus(needId(), STATUS_VERBS[cmd], { note: opt.note ?? (pos.slice(1).join(' ') || undefined) });
-    return print(t, taskLine(t));
+    const t = core.setStatus(needId(), STATUS_VERBS[cmd], { note: opt.note ?? (pos.slice(1).join(' ') || undefined), force: opt.force });
+    const freed = cmd === 'done' ? core.unblockedBy(t.id) : [];
+    return print(t, taskLine(t) + (freed.length ? `\nunblocked: ${freed.map((u) => `#${u.id} ${u.title}`).join(', ')}` : ''));
   }
 
   switch (cmd) {
@@ -101,8 +121,8 @@ function main(argv) {
       return print(t, `created ${taskLine(t)}`);
     }
     case 'update': {
-      const { note, json, ...patch } = opt;
-      const t = core.updateTask(needId(), patch, { note });
+      const { note, json, force, ...patch } = opt;
+      const t = core.updateTask(needId(), patch, { note, force });
       return print(t, taskLine(t));
     }
     case 'note': {
@@ -117,6 +137,57 @@ function main(argv) {
       if (!pos[1]) throw new Error('usage: ctask snooze <id> <WHEN>');
       const t = core.updateTask(needId(), { next: pos.slice(1).join(' ') });
       return print(t, taskLine(t));
+    }
+    case 'remember': {
+      const m = memory.remember({ text: pos.join(' '), kind: opt.kind, project, global: opt.global, session: core.currentSession(project) });
+      return print(m, `remembered ${memory.memoryLine(m)}`);
+    }
+    case 'memory': {
+      const rows = memory.listMemory({ project, all: opt.all, q: pos.join(' '), kind: opt.kind });
+      return print(rows, rows.length ? rows.map(memory.memoryLine).join('\n') : '(nothing remembered)');
+    }
+    case 'forget': {
+      const m = memory.forget(needId());
+      return console.log(`forgot m${m.id}: ${m.text}`);
+    }
+    case 'link': {
+      const t = core.getTask(needId());
+      let n = 0;
+      for (const f of (opt.file ?? '').split(',').filter(Boolean)) n += links.addLink(t.id, 'file', links.relFile(f.trim(), t.project));
+      for (const k of ['commit', 'branch', 'pr']) if (opt[k]) n += links.addLink(t.id, k, opt[k]);
+      if (!opt.file && !opt.commit && !opt.branch && !opt.pr) links.linkGit(t.id, t.project);
+      return console.log(`linked on #${t.id}${n ? ` (${n} new)` : ''}`);
+    }
+    case 'why': {
+      if (!pos[0]) throw new Error('usage: ctask why <file>');
+      const rows = links.why(pos[0], { project, all: opt.all });
+      return print(rows, rows.length ? rows.map((r) => `${taskLine(r, { showProject: opt.all })}  [${r.file}]`).join('\n') : `no task is linked to ${pos[0]}`);
+    }
+    case 'review': {
+      const r = review({ project, all: opt.all, staleDays: opt.stale ? Number(opt.stale) : undefined });
+      return print(r, reviewText(r, { showProject: opt.all }));
+    }
+    case 'playbook': {
+      const [sub, name, ...restPos] = pos;
+      if (sub === 'list' || !sub) {
+        const rows = playbooks.listPlaybooks();
+        return print(rows, rows.length ? rows.map((b) => `${b.name} — ${b.title} (${b.steps.length} steps)`).join('\n') : '(no playbooks) — save one: ctask playbook save <name> --from <task id>');
+      }
+      if (!name) throw new Error(`usage: ctask playbook ${sub} <name>`);
+      if (sub === 'save') {
+        const pb = playbooks.savePlaybook(name, { from: opt.from, title: opt.title, body: opt.body, instructions: opt.instructions, accept: opt.accept, steps: opt.steps });
+        return print(pb, `saved playbook ${playbookText(pb)}`);
+      }
+      if (sub === 'show') {
+        const pb = playbooks.getPlaybook(name);
+        return print(pb, playbookText(pb));
+      }
+      if (sub === 'rm') return console.log(`removed playbook ${playbooks.removePlaybook(name).name}`);
+      if (sub === 'run') {
+        const res = playbooks.runPlaybook(name, { subject: restPos.join(' ') || undefined, project, start: opt.start, priority: opt.priority, parallel: opt.parallel });
+        return print(res, [`created ${taskLine(res.task)}`, ...res.steps.map((s) => `  ${taskLine(s)}`)].join('\n'));
+      }
+      throw new Error('usage: ctask playbook save|run|list|show|rm');
     }
     case 'rm': {
       const t = core.removeTask(needId());
@@ -162,7 +233,7 @@ function main(argv) {
       return print(p.tasks, pageText(p, { showProject: opt.all }));
     }
     case 'next': {
-      const tasks = core.nextTasks({ project, all: opt.all });
+      const tasks = core.nextTasks({ project, all: opt.all, limit: opt.limit ? Number(opt.limit) : undefined });
       return print(tasks, taskList(tasks, { showProject: opt.all }));
     }
     case 'projects': {

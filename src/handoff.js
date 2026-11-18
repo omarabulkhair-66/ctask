@@ -130,3 +130,27 @@ export function handoffFor(sessionId, project, { maxAgeDays = 14 } = {}) {
     .get(project, cutoff, sessionId ?? null);
   return other ? { ...other, own: false } : null;
 }
+
+/** Absolute paths of files edited since the user's last message (the current turn). */
+export function turnFiles(file) {
+  let files = [];
+  for (const line of readTail(file)) {
+    if (!line) continue;
+    let j;
+    try {
+      j = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (j.isSidechain || j.isMeta) continue;
+    const content = j.message?.content;
+    if (j.type === 'user' && typeof content === 'string' && content.trim() && !/^\s*[<[]/.test(content)) files = [];
+    else if (j.type === 'assistant' && Array.isArray(content)) {
+      for (const c of content) {
+        const p = c.type === 'tool_use' && /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(c.name) && (c.input?.file_path ?? c.input?.notebook_path);
+        if (p && !files.includes(p)) files.push(p);
+      }
+    }
+  }
+  return files;
+}

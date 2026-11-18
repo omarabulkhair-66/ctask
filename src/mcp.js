@@ -2,6 +2,7 @@
 // Same engine as the CLI, for Claude surfaces that have no shell.
 import readline from 'node:readline';
 import * as core from './core.js';
+import * as memory from './memory.js';
 import { pageText, projectsText, taskDetailText, taskLine, taskList } from './format.js';
 
 const str = (description) => ({ type: 'string', description });
@@ -19,6 +20,8 @@ const TOOLS = [
         title: str('Short imperative title'),
         body: str('What and why — context a future session needs'),
         instructions: str('How to carry it out (used verbatim when run as an automation)'),
+        accept: str('Acceptance criteria: what must be true before it can be marked done'),
+        after: { type: 'array', items: { type: 'integer' }, description: 'Ids of tasks that must be closed before this one can start' },
         kind: { type: 'string', enum: core.KINDS },
         priority: { type: 'integer', enum: [1, 2, 3], description: '1 high, 2 normal, 3 low' },
         parent: { type: 'integer', description: 'Parent task id (makes this a step)' },
@@ -77,7 +80,10 @@ const TOOLS = [
       properties: {
         id: { type: 'integer' },
         status: { type: 'string', enum: core.STATUSES },
-        note: str('Progress / result / reason, appended to the task log'),
+        note: str('Progress / result / reason, appended to the task log. Required when status is done: say what you ran or checked.'),
+        accept: str('Acceptance criteria, or "none" to clear'),
+        after: { type: 'array', items: { type: 'integer' }, description: 'Replace the tasks this one waits on' },
+        force: { type: 'boolean', description: 'Override the dependency, ownership and evidence checks' },
         title: str('New title'),
         body: str('New body'),
         instructions: str('New instructions'),
@@ -87,8 +93,39 @@ const TOOLS = [
         tags: str('Comma-separated tags'),
       },
     },
-    run({ id, note, ...patch }) {
-      return `updated ${taskLine(core.updateTask(id, patch, { note }))}`;
+    run({ id, note, force, ...patch }) {
+      return `updated ${taskLine(core.updateTask(id, patch, { note, force }))}`;
+    },
+  },
+  {
+    name: 'memory_add',
+    description:
+      'Remember durable project knowledge that future sessions must know: a rule to follow, a decision and its reason, a gotcha, or a fact. Not for work items.',
+    inputSchema: {
+      type: 'object',
+      required: ['text'],
+      properties: {
+        text: str('One self-contained statement, including the reason when it is a decision'),
+        kind: { type: 'string', enum: memory.MEMORY_KINDS },
+        global: { type: 'boolean', description: 'Applies to every project' },
+        project: str('Project directory (absolute path)'),
+      },
+    },
+    run(a) {
+      const project = core.resolveProject(a.project || undefined);
+      return `remembered ${memory.memoryLine(memory.remember({ ...a, project, session: core.currentSession(project) }))}`;
+    },
+  },
+  {
+    name: 'memory_list',
+    description: 'Project memory (rules, decisions, gotchas, facts) for the current project, optionally filtered by words.',
+    inputSchema: {
+      type: 'object',
+      properties: { query: str('Words that must all appear'), all: { type: 'boolean', description: 'Every project' }, project: str('Project directory') },
+    },
+    run(a) {
+      const rows = memory.listMemory({ project: core.resolveProject(a.project || undefined), all: a.all, q: a.query });
+      return rows.length ? rows.map(memory.memoryLine).join('\n') : '(nothing remembered)';
     },
   },
   {

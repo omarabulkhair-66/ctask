@@ -1,2 +1,10 @@
 #!/usr/bin/env node
+// node:sqlite still prints an ExperimentalWarning on some Node versions; it would land in hook output
+// and fill the background log once a minute. Drop that one warning, keep every other.
+const emit = process.emitWarning;
+process.emitWarning = (warning, ...args) => {
+  const type = typeof args[0] === 'string' ? args[0] : args[0]?.type;
+  if (type === 'ExperimentalWarning' && /SQLite/i.test(String(warning))) return;
+  return emit.call(process, warning, ...args);
+};
 import('../src/cli.js');

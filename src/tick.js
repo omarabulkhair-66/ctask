@@ -7,6 +7,7 @@ import path from 'node:path';
 import { addNote, archiveOld, setStatus } from './core.js';
 import { homeDir, open } from './db.js';
 import { projectName, taskLine } from './format.js';
+import { dailyReview } from './review.js';
 
 const LABEL = 'com.ctask.tick';
 const plistPath = () => path.join(os.homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`);
@@ -65,6 +66,8 @@ export function notifyDue({ dryRun = false, log = console.log } = {}) {
 
 export function tick({ dryRun = false, log = console.log } = {}) {
   notifyDue({ dryRun, log });
+  const summary = dailyReview({ dryRun });
+  if (summary) log(`${dryRun ? 'would send' : 'sent'} daily review: ${summary}`);
   // Housekeeping: old closed tasks drop out of lists and search (they stay in the database).
   const after = process.env.CTASK_ARCHIVE_AFTER || '30d';
   if (after !== 'off') {

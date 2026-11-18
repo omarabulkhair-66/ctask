@@ -61,6 +61,44 @@ const MIGRATIONS = [
   `ALTER TABLE tasks ADD COLUMN archived_at TEXT;  -- set on old closed tasks: hidden from lists and search by default`,
   `ALTER TABLE sessions ADD COLUMN handoff TEXT;      -- where the session stood, captured before compaction / at end
    ALTER TABLE sessions ADD COLUMN handoff_at TEXT;`,
+  `
+  ALTER TABLE tasks ADD COLUMN accept TEXT;          -- acceptance criteria: what must be true to call it done
+
+  CREATE TABLE deps (                                -- task_id cannot start until depends_on is closed
+    task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    depends_on INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, depends_on)
+  );
+  CREATE INDEX deps_on ON deps(depends_on);
+
+  CREATE TABLE links (                               -- what a task touched: file | commit | branch | pr
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    kind    TEXT NOT NULL,
+    ref     TEXT NOT NULL,
+    at      TEXT NOT NULL,
+    PRIMARY KEY (task_id, kind, ref)
+  );
+  CREATE INDEX links_ref ON links(kind, ref);
+
+  CREATE TABLE memory (                              -- durable project knowledge, not work items
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    project    TEXT,                                 -- NULL = applies to every project
+    kind       TEXT NOT NULL DEFAULT 'fact',         -- rule | decision | gotcha | fact
+    text       TEXT NOT NULL,
+    session_id TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX memory_project ON memory(project);
+
+  CREATE TABLE playbooks (                           -- reusable task recipes
+    name       TEXT PRIMARY KEY,
+    spec       TEXT NOT NULL,                        -- JSON: {title, body, instructions, accept, steps:[{title, instructions}]}
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+  `,
 ];
 
 let db;
