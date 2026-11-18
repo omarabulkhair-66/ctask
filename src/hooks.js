@@ -4,11 +4,13 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { countTasks, listTasks, projectsSummary, resolveProject, staleInProgress, touchSession } from './core.js';
 import { projectName, taskLine } from './format.js';
+import { findTranscript, handoffFor, latestTaskHandoff, saveHandoff, summarizeTranscript } from './handoff.js';
 import { ensureDaemon } from './tick.js';
+import { fmtRelative } from './time.js';
 
 const RULES = `How to use ctask (your persistent task engine — it survives sessions, unlike the in-chat task list):
 - Multi-step work, anything spanning turns/sessions, or anything the user asks you to remember: \`ctask add "title" --body "..." --instructions "..."\`, then \`ctask start <id>\`. Break big tasks into steps with \`--parent <id>\`.
-- Keep it true as you go: \`ctask note <id> "decision / progress"\`, \`ctask done <id> --note "result"\`, \`ctask block <id> --note "why"\`, \`ctask wait <id> --note "what you need from the user"\`.
+- Keep it true as you go: \`ctask note <id> "decision / progress"\`, \`ctask done <id> --note "result"\`, \`ctask block <id> --note "why"\`, \`ctask wait <id> --note "what you need from the user"\`. Stopping mid-task: \`ctask handoff <id> "state / what was tried and failed / next step"\`.
 - Follow-ups and reminders: \`ctask add "..." --next "tomorrow 9:00"\` (add \`--every 1d\` to repeat). For a reminder due soon, also schedule a one-shot CronCreate wake-up at that minute (if you have that tool) so you say it in the chat on time. Unattended recurring work: \`--kind automation --instructions "..."\`.
 - DUE items below: tell the user about them, then \`ctask done <id>\` or \`ctask snooze <id> 2h\`.
 - "What's open?" / "where were we?": \`ctask list\` (paged), \`ctask search "<words>"\` (also finds closed tasks and notes), \`ctask show <id>\`, \`ctask projects\` (all projects).`;
@@ -31,6 +33,26 @@ export function digest(project, sessionId, { rules = true } = {}) {
     if (total > max) out.push(`  … ${total - max} more (ctask list --page 2, or ctask search "<words>")`);
   }
   if (!openTotal) out.push('No open tasks in this project.');
+  // Handoff: what the previous context knew that this one does not.
+  const active = listTasks({ project, status: ['in_progress'], limit: 2 });
+  const shown = new Set();
+  for (const t of active) {
+    const ho = latestTaskHandoff(t.id);
+    if (!ho) continue;
+    shown.add(ho.note.replace(/^\[auto[^\]]*\]\n/, ''));
+    out.push('', `HANDOFF for #${t.id} (${ago(ho.at)}):`, ho.note);
+  }
+  const ho = handoffFor(sessionId, project);
+  if (ho && !shown.has(ho.handoff)) {
+    out.push(
+      '',
+      ho.own
+        ? `HANDOFF — this session before its context was compacted (${ago(ho.handoff_at)}):`
+        : `HANDOFF — the previous session in this project (${ago(ho.handoff_at)}):`,
+      ho.handoff,
+    );
+  }
+  if (shown.size || ho) out.push('Read the handoff before redoing work; `ctask show <id>` has the full log.');
   const others = projectsSummary().filter((p) => p.project !== project);
   if (others.length) {
     out.push(
@@ -85,6 +107,15 @@ const handlers = {
     return context('UserPromptSubmit', `[ctask] ${bits.join(' · ')}`);
   },
 
+  // Context is about to be summarised: capture where things stand while the detail still exists.
+  'pre-compact'(input, project) {
+    return captureHandoff(input, project, `before ${input.trigger === 'manual' ? 'manual ' : ''}compaction`);
+  },
+
+  'session-end'(input, project) {
+    return captureHandoff(input, project, 'session end');
+  },
+
   stop(input) {
     if (input.stop_hook_active || process.env.CTASK_STOP_GUARD === 'off') return '';
     const stale = staleInProgress(input.session_id);
@@ -99,6 +130,20 @@ const handlers = {
     });
   },
 };
+
+function ago(iso) {
+  const r = fmtRelative(iso);
+  return r === 'now' ? 'just now' : `${r.replace('overdue ', '')} ago`;
+}
+
+function captureHandoff(input, project, reason) {
+  if (!input.session_id) return '';
+  touchSession(input.session_id, project);
+  const file = findTranscript(input);
+  const text = file && summarizeTranscript(file, input.cwd || project);
+  if (text) saveHandoff(input.session_id, text, reason);
+  return '';
+}
 
 export function runHook(name) {
   try {

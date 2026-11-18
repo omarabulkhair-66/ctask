@@ -17,6 +17,7 @@ Use the `ctask` command through Bash. Where there is no shell, the same engine i
   ctask add "Parser" --parent 12
   ```
 - **A decision, a finding, a place you stopped** → `ctask note 12 "…"`. Write what a fresh session would need, not a diary.
+- **Stopping with work unfinished** → `ctask handoff 12 "state: … / tried and failed: … / next: …"`. The next session (or this one after its context is compacted) is shown the latest handoff first. An automatic one is captured from the transcript before compaction and at session end, but it only records what happened; yours records what you concluded.
 - **Finished** → `ctask done 12 --note "what changed, what was verified"`.
 - **Need the user** → `ctask wait 12 --note "need the API key for X"`. **Stuck on something else** → `ctask block 12 --note "why"`.
 - **"Remind me / follow up / check later"** → `ctask add "Ask about the invoice" --next "tomorrow 9:00"` (add `--every 1w` to repeat). If the reminder is due within the life of this session and you have the `CronCreate` tool, also schedule a one-shot wake-up for the same minute (`recurring: false`, prompt: `ctask reminder #<id> is due: tell the user, then ctask done <id>`), so you speak up in the chat at that time instead of waiting for their next message. ctask stays the record; the wake-up is only the voice.
@@ -26,7 +27,7 @@ Trivial one-shot answers do not need a task.
 
 ## When to read it
 
-- Session start: the digest is injected for you. Mention due items to the user first.
+- Session start: the digest is injected for you. If it has a HANDOFF section, that is where the previous context stopped: read it before doing anything else. Mention due items to the user first.
 - Resuming: `ctask show <id>` gives body, instructions, steps and the log. Read it before redoing work.
 - Looking for something specific, or an old/closed task → `ctask search "invoice client"` (every word must match; covers notes and closed tasks; `--all` for every project).
 - Closed tasks older than 30 days are archived automatically and hidden; add `--archived` to `search` (or `list`) when looking for old history.

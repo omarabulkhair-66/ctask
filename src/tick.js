@@ -110,6 +110,48 @@ const target = () => `gui/${process.getuid()}`;
 const launchctl = (...a) => spawnSync('launchctl', a, { encoding: 'utf8' });
 const loaded = () => launchctl('print', `${target()}/${LABEL}`).status === 0;
 
+const launcherPath = () => path.join(homeDir(), 'bin', 'tick');
+const pointerPath = () => path.join(homeDir(), 'current');
+
+function writeIfChanged(file, content, mode) {
+  let old = null;
+  try {
+    old = fs.readFileSync(file, 'utf8');
+  } catch {}
+  if (old === content) return false;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content, mode ? { mode } : undefined);
+  if (mode) fs.chmodSync(file, mode);
+  return true;
+}
+
+/**
+ * launchd runs a small launcher at a fixed path instead of the plugin itself, because an installed
+ * plugin lives in a versioned directory that disappears on update. The launcher follows
+ * ~/.ctask/current, and if that copy is gone it picks the newest installed version on its own.
+ */
+export function writeLauncher(cliPath) {
+  const sq = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
+  // <cache>/<marketplace>/<plugin>/<version>/bin/ctask -> search <cache>/<marketplace>/<plugin>/*/bin/ctask
+  const m = /^(.*\/plugins\/cache\/[^/]+\/[^/]+)\/[^/]+\/bin\/ctask$/.exec(cliPath);
+  writeIfChanged(pointerPath(), cliPath + '\n');
+  writeIfChanged(
+    launcherPath(),
+    `#!/bin/sh
+# ctask background launcher. Managed by the ctask plugin; changes are overwritten.
+cli=$(cat ${sq(pointerPath())} 2>/dev/null)
+${m ? `if [ ! -f "$cli" ]; then
+  # The plugin was updated or reinstalled: use the newest installed version.
+  cli=$(ls -t ${sq(m[1])}/*/bin/ctask 2>/dev/null | head -1)
+fi
+` : ''}[ -f "$cli" ] || exit 0
+exec "$(dirname "$cli")/ctask-run" tick
+`,
+    0o755,
+  );
+  return launcherPath();
+}
+
 function install(cliPath) {
   const file = plistPath();
   const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -127,7 +169,7 @@ function install(cliPath) {
 <plist version="1.0"><dict>
   <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key><array>
-    <string>${esc(process.execPath)}</string><string>${esc(cliPath)}</string><string>tick</string>
+    <string>${esc(writeLauncher(cliPath))}</string>
   </array>
   <key>StartInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
@@ -147,7 +189,7 @@ function install(cliPath) {
 
 /**
  * Called by the SessionStart hook so the plugin looks after its own background checker: installs it
- * if missing, and repairs it if the plugin or node moved. Opt out with CTASK_DAEMON=off.
+ * if missing and keeps its launcher pointed at this copy of the plugin. Opt out with CTASK_DAEMON=off.
  */
 export function ensureDaemon(cliPath) {
   if (process.platform !== 'darwin' || process.env.CTASK_DAEMON === 'off') return;
@@ -156,8 +198,8 @@ export function ensureDaemon(cliPath) {
   try {
     current = fs.readFileSync(plistPath(), 'utf8');
   } catch {}
-  const upToDate = current.includes(`<string>${cliPath}</string>`) && current.includes(`<string>${process.execPath}</string>`);
-  if (!upToDate || !loaded()) install(cliPath);
+  writeLauncher(cliPath); // keeps the pointer on the copy that is running now
+  if (!current.includes(`<string>${launcherPath()}</string>`) || !loaded()) install(cliPath);
 }
 
 export function daemon(action, cliPath, log = console.log) {

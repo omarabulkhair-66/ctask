@@ -125,3 +125,72 @@ test('archiving hides old closed tasks without deleting them', async () => {
   assert.equal(json(['archive', String(recent.id)]).archived_at !== null, true);
   assert.equal(json(['unarchive', String(recent.id)]).archived_at, null);
 });
+
+test('background launcher survives a plugin update', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ctask-home-'));
+  const cache = path.join(home, 'plugins', 'cache', 'mk', 'ctask');
+  const fake = (version) => {
+    const bin = path.join(cache, version, 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'ctask'), '');
+    fs.writeFileSync(path.join(bin, 'ctask-run'), `#!/bin/sh\necho "${version} $1"\n`, { mode: 0o755 });
+    return path.join(bin, 'ctask');
+  };
+  const v1 = fake('1.0.0');
+  process.env.CTASK_HOME = home;
+  const { writeLauncher } = await import('../src/tick.js');
+  const launcher = writeLauncher(v1);
+  delete process.env.CTASK_HOME;
+  const fire = () => execFileSync(launcher, { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } }).trim();
+  assert.equal(fire(), '1.0.0 tick');
+
+  fake('1.1.0'); // update: new version installed, old one removed
+  fs.rmSync(path.join(cache, '1.0.0'), { recursive: true });
+  assert.equal(fire(), '1.1.0 tick');
+
+  fs.rmSync(cache, { recursive: true }); // plugin gone entirely: stay quiet
+  assert.equal(fire(), '');
+});
+
+test('handoff is captured from the transcript and shown to the next session', () => {
+  const transcript = path.join(dir, 'transcript.jsonl');
+  const line = (o) => JSON.stringify(o) + '\n';
+  fs.writeFileSync(
+    transcript,
+    line({ type: 'user', message: { content: 'Migrate the billing tables' } }) +
+      line({ type: 'user', message: { content: '<task-notification>ignored</task-notification>' } }) +
+      line({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } }) +
+      line({ type: 'assistant', isSidechain: true, message: { content: [{ type: 'text', text: 'subagent chatter' }] } }) +
+      line({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Edit', input: { file_path: path.join(dir, 'db/schema.sql') } },
+            { type: 'tool_use', name: 'Bash', input: { command: 'npm test', description: 'Run the tests' } },
+            { type: 'text', text: 'Two migrations applied, the third fails on a foreign key.' },
+          ],
+        },
+      }) +
+      'not json\n',
+  );
+  const hook = (name, session, extra = {}) => run(['hook', name], JSON.stringify({ session_id: session, cwd: dir, ...extra }));
+  const t = json(['add', 'Billing migration', '--start', '--session', 'sess-ho']);
+  run(['update', String(t.id), '--session', 'sess-ho']);
+  assert.equal(hook('pre-compact', 'sess-ho', { transcript_path: transcript, trigger: 'auto' }), '');
+
+  const detail = json(['show', String(t.id)]);
+  const note = detail.events.find((e) => e.type === 'handoff').note;
+  assert.match(note, /Migrate the billing tables/);
+  assert.match(note, /third fails on a foreign key/);
+  assert.match(note, /db\/schema\.sql/);
+  assert.match(note, /Run the tests/);
+  assert.doesNotMatch(note, /ignored|subagent chatter/);
+
+  hook('pre-compact', 'sess-ho', { transcript_path: transcript }); // a second capture replaces the first
+  assert.equal(json(['show', String(t.id)]).events.filter((e) => e.type === 'handoff').length, 1);
+
+  const next = JSON.parse(hook('session-start', 'sess-after')).hookSpecificOutput.additionalContext;
+  assert.match(next, new RegExp(`HANDOFF for #${t.id}[\\s\\S]*third fails on a foreign key`));
+  assert.equal(hook('session-end', 'sess-none', { transcript_path: path.join(dir, 'missing.jsonl') }), '');
+  run(['done', String(t.id)]);
+});

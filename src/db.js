@@ -59,6 +59,8 @@ const MIGRATIONS = [
   `,
   `ALTER TABLE tasks ADD COLUMN notified_at TEXT;  -- last time a due notification was shown`,
   `ALTER TABLE tasks ADD COLUMN archived_at TEXT;  -- set on old closed tasks: hidden from lists and search by default`,
+  `ALTER TABLE sessions ADD COLUMN handoff TEXT;      -- where the session stood, captured before compaction / at end
+   ALTER TABLE sessions ADD COLUMN handoff_at TEXT;`,
 ];
 
 let db;

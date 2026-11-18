@@ -15,6 +15,7 @@ Create
 Work
   ctask start|done|block|wait|cancel|reopen <id> [--note T]
   ctask note <id> <text>
+  ctask handoff <id> <text>     where it stands, what failed, the next step (shown to the next session)
   ctask update <id> [--title --body --instructions --kind --priority --tags --parent --status
                      --next WHEN|none --every INT|none --session ID --note T]
   ctask snooze <id> <WHEN>
@@ -34,7 +35,7 @@ Automation
   ctask tick [--dry-run]        notify due reminders, run due automations with \`claude -p\`
   ctask daemon install|uninstall|status   background checker (the plugin installs it itself)
 Integration
-  ctask hook session-start|user-prompt|stop     Claude Code hooks (JSON on stdin)
+  ctask hook session-start|user-prompt|stop|pre-compact|session-end     Claude Code hooks (JSON on stdin)
   ctask mcp                     MCP server on stdio
 
 WHEN: now, 30m, 2h, 3d, 17:30, today 17:30, tomorrow [9:00], 2026-12-01 [14:00], or ISO.
@@ -107,6 +108,10 @@ function main(argv) {
     case 'note': {
       const t = core.addNote(needId(), pos.slice(1).join(' '));
       return console.log(`noted on #${t.id}`);
+    }
+    case 'handoff': {
+      const t = core.addNote(needId(), pos.slice(1).join(' '), { type: 'handoff' });
+      return console.log(`handoff saved on #${t.id}`);
     }
     case 'snooze': {
       if (!pos[1]) throw new Error('usage: ctask snooze <id> <WHEN>');

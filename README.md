@@ -58,8 +58,15 @@ A connector alone gives Claude tools it can forget. The hooks are what make it s
 | SessionStart | Injects the project digest (due now, in progress, open, other projects) and the usage rules. Records the session id. Keeps the background checker installed. |
 | UserPromptSubmit | Adds one line to every prompt: the active task, anything due, or a nudge to create a task. |
 | Stop | Blocks the end of a turn once if the session has an `in_progress` task it did not touch that turn. |
+| PreCompact, SessionEnd | Capture a handoff note from the transcript before context is lost. |
 
 The skill (`skills/ctask/SKILL.md`) teaches Claude when to write and when to read. The MCP server exposes the same engine as tools (`task_add`, `task_list`, `task_get`, `task_update`, `task_next`) for surfaces without a shell.
+
+## Handoff notes
+
+Long sessions get compacted and closed sessions forget. Just before either happens, ctask reads the end of the session transcript and saves a handoff: the user's last requests, where Claude left off, the files it edited and its last commands. No model call is involved, so it always happens. The handoff is attached to the session and to any task it had in progress.
+
+The next SessionStart shows it: to the same session after compaction or resume, or to a new session in the same project (up to 14 days later). Claude can also write its own with `ctask handoff <id> "state / what failed / next step"`, which takes priority on that task. Handoffs contain excerpts of your conversation and stay in the local database.
 
 ## Commands
 
@@ -88,6 +95,8 @@ Archive  ctask archive [<id>] [--older 30d] [--all] [--dry-run]
 ## Background checker
 
 On macOS the plugin installs and maintains a launchd agent (`com.ctask.tick`) from the SessionStart hook. Every minute it runs `ctask tick`, which notifies due reminders, runs due automations, and archives closed tasks older than 30 days.
+
+The agent runs a small launcher in `~/.ctask/bin/` rather than the plugin directly, so it keeps working when the plugin is updated to a new version.
 
 `ctask daemon status|uninstall|install` inspects or controls it. After `uninstall` the plugin leaves it off until you run `install`. Its log is `~/.ctask/tick.log`. On Linux, run `ctask tick` from cron.
 
