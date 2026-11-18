@@ -99,6 +99,45 @@ const MIGRATIONS = [
 
   CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
   `,
+  `
+  -- Memory that is edited, replaced and recalled, not only appended.
+  ALTER TABLE memory ADD COLUMN updated_at TEXT;
+  ALTER TABLE memory ADD COLUMN status TEXT NOT NULL DEFAULT 'active';   -- active | superseded
+  ALTER TABLE memory ADD COLUMN superseded_by INTEGER;
+  ALTER TABLE memory ADD COLUMN importance INTEGER NOT NULL DEFAULT 2;   -- 1 high, 2 normal, 3 low
+  ALTER TABLE memory ADD COLUMN triggers TEXT;                            -- phrases that always recall it
+  ALTER TABLE memory ADD COLUMN uses INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE memory ADD COLUMN last_used_at TEXT;
+  UPDATE memory SET updated_at=created_at;
+
+  CREATE TABLE memory_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+    at TEXT NOT NULL, session_id TEXT, kind TEXT, text TEXT NOT NULL
+  );
+
+  CREATE TABLE recalls (                              -- every time a memory was put in front of Claude
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id INTEGER NOT NULL REFERENCES memory(id) ON DELETE CASCADE,
+    session_id TEXT, epoch INTEGER NOT NULL DEFAULT 0,
+    at TEXT NOT NULL, how TEXT NOT NULL, score REAL    -- how: start | prompt | manual
+  );
+  CREATE INDEX recalls_session ON recalls(session_id, epoch);
+  CREATE INDEX recalls_at ON recalls(at);
+
+  ALTER TABLE sessions ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0;         -- bumps on start/resume/compaction
+  ALTER TABLE sessions ADD COLUMN prompts INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE sessions ADD COLUMN mem_nudged_at INTEGER NOT NULL DEFAULT 0; -- prompt count at last memory checkpoint
+
+  CREATE TABLE calls (                                -- every hook, command and MCP tool call
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL, source TEXT NOT NULL, name TEXT NOT NULL, args TEXT,
+    session_id TEXT, project TEXT, ms INTEGER, out_chars INTEGER NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL DEFAULT 1, error TEXT, detail TEXT
+  );
+  CREATE INDEX calls_at ON calls(at);
+  CREATE INDEX calls_session ON calls(session_id);
+  `,
 ];
 
 let db;

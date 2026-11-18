@@ -20,13 +20,52 @@ Use the `ctask` command through Bash. Where there is no shell, the same engine i
 - **Stopping with work unfinished** → `ctask handoff 12 "state: … / tried and failed: … / next: …"`. The next session (or this one after its context is compacted) is shown the latest handoff first. An automatic one is captured from the transcript before compaction and at session end, but it only records what happened; yours records what you concluded.
 - **Finished** → `ctask done 12 --note "what changed and what you ran or checked"`. The note is required: it is the evidence. If the task has acceptance criteria (`--accept`), check each one first. Never mark done on an assumption; if you could not verify, say so in a `note` and leave it open or `wait`.
 - **Work that must happen in order** → `ctask add "Deploy" --after 14,15`. A task cannot start until what it waits on is closed, and `ctask next` only offers what is ready.
-- **Something every future session must know** (a convention, a decision and its reason, a trap you fell into) → `ctask remember "Never edit generated/ by hand, run make gen" --kind rule`. Kinds: `rule`, `decision`, `gotcha`, `fact`. This is not a task: it is shown at every session start in this project.
+- **Something every future session must know** → see [Memory](#memory) below. It is not a task.
 - **Repeatable work** → if a playbook matches (they are listed at session start), `ctask playbook run <name> [subject] --start` instead of inventing the steps. After doing a multi-step job well that will recur, offer to save it: `ctask playbook save <name> --from <task id>`.
 - **Need the user** → `ctask wait 12 --note "need the API key for X"`. **Stuck on something else** → `ctask block 12 --note "why"`.
 - **"Remind me / follow up / check later"** → `ctask add "Ask about the invoice" --next "tomorrow 9:00"` (add `--every 1w` to repeat). If the reminder is due within the life of this session and you have the `CronCreate` tool, also schedule a one-shot wake-up for the same minute (`recurring: false`, prompt: `ctask reminder #<id> is due: tell the user, then ctask done <id>`), so you speak up in the chat at that time instead of waiting for their next message. ctask stays the record; the wake-up is only the voice.
 - **Recurring unattended work** → `ctask add "Summarise error logs" --kind automation --every 1d --instructions "exact steps"`. It runs via `ctask tick` in a headless session, so the instructions must stand on their own.
 
 Trivial one-shot answers do not need a task.
+
+## Memory
+
+Memory is what makes the next session smarter than this one. Treat it as a small, accurate set of statements you maintain, not a log you append to.
+
+**Save** the moment you learn something durable, not at the end:
+
+```bash
+ctask remember "Never edit generated/ by hand, run make gen" --kind rule
+ctask remember "User wants commit messages in English, replies in Arabic" --kind preference --global
+ctask remember "Chose SQLite over Postgres: local, single user, no server, hooks must start in 0.2s" --kind decision
+ctask remember "Seed a demo database with --class=DemoSeeder" --kind fact --when "demo, seed"
+```
+
+- Kinds: `rule` and `preference` are shown at every session start; `decision`, `gotcha` and `fact` are recalled when a message is about them. Write one self-contained statement, with the reason for a decision.
+- `--when "words, phrases"` makes an entry come back whenever those words appear. Use it for things that matter only in one situation. Recall matches words and does not translate: when the user writes in a different language from the memory text, add trigger words in their language too (`--when "deploy, نشر, رفع"`), and when you look something up yourself, `ctask recall` in the language the memories are written in.
+- `--global` for what is true in every project (mostly user preferences).
+
+**Correct, do not duplicate.** When a memory you were shown is wrong, incomplete or out of date:
+
+```bash
+ctask memory update m3 "The rate limit is 120 per minute, raised in March"
+ctask remember "We moved from Redis to Valkey" --kind decision --replaces m7
+ctask memory merge m4 m9 "One statement that covers both"
+```
+
+A new entry that repeats an existing one is refused and names the entry to update. Fix it there. If the user contradicts a memory, update it in the same turn.
+
+**Recall.** Relevant entries are added to the conversation for you as it moves ("RELEVANT MEMORY"), once per context and again after compaction. Before starting work in an area you have not touched this session, look yourself: `ctask recall "payments webhook"`.
+
+**When prompted.** "MEMORY CHECKPOINT" and "MEMORY: this message reads like a lasting instruction" mean: decide now whether there is something to save or correct. It is fine for the answer to be no.
+
+**Upkeep.** `ctask memory review` lists near-duplicates and entries nothing recalls; merge, re-word or forget them when it comes up.
+
+Do not save: what the code or git history already says, the current task's progress (that is a note or a handoff), or anything true only for this conversation.
+
+## Insight
+
+`ctask stats` shows what ctask did in the last week (context added, memories recalled, where it stepped in, what it cost) and `ctask log` shows the individual calls. Use them when the user asks what difference ctask is making.
 
 ## When to read it
 

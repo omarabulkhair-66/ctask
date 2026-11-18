@@ -26,6 +26,7 @@ It is not a Jira or Linear replacement. It is Claude's own working memory: the s
   - [Automations](#automations)
   - [Handoff notes](#handoff-notes)
   - [Project memory](#project-memory)
+  - [Stats and the call log](#what-ctask-is-doing-stats-and-the-call-log)
   - [Evidence before done](#evidence-before-done)
   - [Dependencies and parallel sessions](#dependencies-and-parallel-sessions)
   - [Code links](#code-links)
@@ -48,7 +49,8 @@ It is not a Jira or Linear replacement. It is Claude's own working memory: the s
 | **Reminders** | A macOS notification when something is due, and Claude raises it in the chat. |
 | **Automations** | Recurring work that runs unattended in a headless Claude session. |
 | **Handoff notes** | Where a session stood is saved before its context is compacted or it ends. |
-| **Project memory** | Rules, decisions and gotchas shown to every session in the project. |
+| **Project memory** | Rules, preferences, decisions and gotchas that Claude edits over time and recalls when relevant. |
+| **Stats and call log** | See what ctask adds to your sessions, where it steps in, and what it costs. |
 | **Evidence before done** | A task cannot be closed without saying what was checked. |
 | **Dependencies** | Tasks wait for each other; parallel sessions do not collide. |
 | **Code links** | Which task changed a file, and why. |
@@ -147,7 +149,7 @@ Alongside the hooks:
 
 - **The CLI** (`ctask`) is the engine. Claude calls it through its shell.
 - **The skill** teaches Claude when to write and when to read.
-- **The MCP server** exposes the same engine as tools, for surfaces with no shell: `task_add`, `task_list`, `task_get`, `task_update`, `task_next`, `memory_add`, `memory_list`.
+- **The MCP server** exposes the same engine as tools, for surfaces with no shell: `task_add`, `task_list`, `task_get`, `task_update`, `task_next`, `memory_add`, `memory_update`, `memory_recall`, `memory_list`.
 - **The background checker** runs once a minute for notifications, automations and housekeeping.
 
 Everything is stored in one SQLite file, `~/.ctask/ctask.db`. A project is the git root above the working directory, or the directory itself.
@@ -223,17 +225,41 @@ ctask handoff 12 "state: parser done / failed: streaming on Windows paths / next
 
 ### Project memory
 
-Tasks end. Knowledge should not.
+Tasks end. Knowledge should not. Memory is a small set of statements Claude maintains about a project: rules, your preferences, decisions and their reasons, gotchas and facts.
 
 ```bash
 ctask remember "Never edit generated/ by hand, run make gen" --kind rule
 ```
 
 ```bash
-ctask remember "Chose Postgres over MySQL for JSONB support" --kind decision
+ctask remember "Seed a demo database with --class=DemoSeeder" --kind fact --when "demo, seed"
 ```
 
-Kinds are `rule`, `decision`, `gotcha` and `fact`. Every session that starts in the project is shown the list, rules first. `--global` applies an entry to every project, `ctask memory [words]` searches, and `ctask forget m3` removes one.
+What makes it more than a notes file:
+
+- **It is edited, not only appended.** `ctask memory update m3 "corrected text"` changes an entry and keeps the old version as history. `--replaces m7` supersedes an entry, and `ctask memory merge m4 m9 "..."` folds several into one. A new entry that repeats an existing one is refused and points at the one to update, so memory does not fill with near-copies.
+- **It is recalled when relevant, not dumped.** Only rules and preferences are shown at session start. Everything else is matched against each message you send, and the few entries that are about it are added to the conversation, once per context.
+- **It survives long conversations.** After the context is compacted, recall starts fresh, so what was lost comes back the next time it matters.
+- **Claude is prompted to keep it current.** When a message reads like a lasting instruction ("from now on…"), and every few messages with nothing saved, Claude is reminded to save or correct what the conversation has taught it.
+- **It is measured.** Every recall is counted. `ctask memory review` lists near-duplicates and entries nothing has recalled in 30 days; `ctask memory show m3` shows an entry's versions and how often it was used.
+
+Matching is done locally by word overlap, weighted towards rarer words, with Arabic and English normalised. It does not translate: an Arabic message will not find an English memory unless they share words or you give the entry `--when` triggers in both languages.
+
+### What ctask is doing: stats and the call log
+
+Every hook that fires, every command Claude runs and every MCP tool call is logged locally.
+
+```bash
+ctask stats
+```
+
+shows the last seven days: how much context was added and what it costs in tokens, how many memories were recalled and which ones most, how many tasks were created and closed, how often ctask stepped in (a turn held until the task was updated, a "done" refused without evidence, a duplicate memory refused), and how long the hooks take. `--days 30` and `--all` widen it.
+
+```bash
+ctask log --limit 40
+```
+
+shows the individual calls. Filter with `--source hook|cli|mcp|tick`, `--session ID`, `--name N` or `--failed`. Entries older than 90 days are removed (`CTASK_LOG_DAYS`), and `CTASK_LOG=off` disables logging.
 
 ### Evidence before done
 
@@ -342,9 +368,18 @@ Look
   ctask context                   the digest Claude sees at session start
 
 Memory
-  ctask remember <text> [--kind rule|decision|gotcha|fact] [--global]
+  ctask remember <text> [--kind rule|preference|decision|gotcha|fact] [--when "words"]
+                        [--importance 1|2|3] [--replaces mID] [--global] [--force]
   ctask memory [words] [--all] [--kind K]
+  ctask memory update <mID> [new text] [--kind K] [--when W|none] [--importance N]
+  ctask memory merge <mID> <mID> [...] <combined text>
+  ctask memory show <mID> | review [--all]
+  ctask recall <text>
   ctask forget <mID>
+
+Insight
+  ctask stats [--days 7] [--all]
+  ctask log [--limit 40] [--source hook|cli|mcp|tick] [--session ID] [--name N] [--failed]
 
 Code
   ctask link <id> [--file a,b] [--commit SHA] [--branch NAME] [--pr URL]
@@ -395,11 +430,15 @@ Set these as environment variables.
 | `CTASK_NOTIFY` | on | `off` disables macOS notifications. |
 | `CTASK_REVIEW_AT` | `09:00` | Time of the daily review notification. `off` disables it. |
 | `CTASK_ARCHIVE_AFTER` | `30d` | Age at which closed tasks are archived. `off` disables it. |
+| `CTASK_MEMORY_EVERY` | `8` | Messages without a memory write before Claude is reminded to save. |
+| `CTASK_LOG` | on | `off` disables the call log. |
+| `CTASK_LOG_DAYS` | `90` | How long call log entries are kept. |
 | `CTASK_CLAUDE_BIN` | `claude` | The executable used to run automations. |
 
 ## Data and privacy
 
 - Everything is stored locally in `~/.ctask/ctask.db`. ctask makes no network requests.
+- The call log records command names, their arguments (truncated) and timings, not conversation text.
 - Handoff notes contain short excerpts of your conversation (your last requests and Claude's last message). They stay in that same local database.
 - Automations call your own `claude` CLI, under your account.
 - Back up or move your data by copying the `~/.ctask` folder.
@@ -434,7 +473,9 @@ npm test
 | `src/core.js` | Tasks, statuses, dependencies, lists, search, archive |
 | `src/hooks.js` | The five hook handlers and the session digest |
 | `src/handoff.js` | Transcript summariser |
-| `src/memory.js`, `src/links.js`, `src/playbooks.js`, `src/review.js` | One feature each |
+| `src/memory.js` | Memory: editing, similarity, ranking, recall |
+| `src/log.js` | Call log and stats |
+| `src/links.js`, `src/playbooks.js`, `src/review.js` | One feature each |
 | `src/tick.js` | Background checker and launchd agent |
 | `src/mcp.js` | MCP server |
 | `hooks/hooks.json`, `skills/ctask/SKILL.md`, `.claude-plugin/` | Plugin wiring |

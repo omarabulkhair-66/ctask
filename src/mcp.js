@@ -2,6 +2,7 @@
 // Same engine as the CLI, for Claude surfaces that have no shell.
 import readline from 'node:readline';
 import * as core from './core.js';
+import { logCall } from './log.js';
 import * as memory from './memory.js';
 import { pageText, projectsText, taskDetailText, taskLine, taskList } from './format.js';
 
@@ -100,7 +101,7 @@ const TOOLS = [
   {
     name: 'memory_add',
     description:
-      'Remember durable project knowledge that future sessions must know: a rule to follow, a decision and its reason, a gotcha, or a fact. Not for work items.',
+      'Remember durable knowledge that future sessions must know: a rule, a user preference, a decision and its reason, a gotcha, or a fact. Not for work items. Refused if it duplicates an existing entry: use memory_update on that entry, or pass replaces.',
     inputSchema: {
       type: 'object',
       required: ['text'],
@@ -108,12 +109,45 @@ const TOOLS = [
         text: str('One self-contained statement, including the reason when it is a decision'),
         kind: { type: 'string', enum: memory.MEMORY_KINDS },
         global: { type: 'boolean', description: 'Applies to every project' },
+        when: str('Comma-separated words or phrases that should always bring this memory back, e.g. "deploy, release"'),
+        importance: { type: 'integer', enum: [1, 2, 3], description: '1 high, 2 normal, 3 low' },
+        replaces: { type: 'array', items: { type: 'integer' }, description: 'Ids of memories this one supersedes' },
+        force: { type: 'boolean', description: 'Store even if a similar entry exists' },
         project: str('Project directory (absolute path)'),
       },
     },
     run(a) {
       const project = core.resolveProject(a.project || undefined);
       return `remembered ${memory.memoryLine(memory.remember({ ...a, project, session: core.currentSession(project) }))}`;
+    },
+  },
+  {
+    name: 'memory_update',
+    description: 'Correct or refine an existing memory in place (its previous version is kept as history). Use this instead of adding a second entry when something you knew turns out wrong, incomplete or out of date.',
+    inputSchema: {
+      type: 'object',
+      required: ['id'],
+      properties: {
+        id: { type: 'integer' },
+        text: str('The corrected statement'),
+        kind: { type: 'string', enum: memory.MEMORY_KINDS },
+        when: str('Trigger words, or "none" to clear'),
+        importance: { type: 'integer', enum: [1, 2, 3] },
+      },
+    },
+    run({ id, ...patch }) {
+      const project = core.resolveProject();
+      return `updated ${memory.memoryLine(memory.updateMemory(id, patch, { session: core.currentSession(project), project }))}`;
+    },
+  },
+  {
+    name: 'memory_recall',
+    description: 'Memories relevant to a topic or a piece of work, ranked. Use before starting work in an area, or when unsure how something is done in this project.',
+    inputSchema: { type: 'object', required: ['text'], properties: { text: str('Topic, question or task description'), project: str('Project directory') } },
+    run(a) {
+      const project = core.resolveProject(a.project || undefined);
+      const hits = memory.recall({ project, text: a.text, session: core.currentSession(project), how: 'manual' });
+      return hits.length ? hits.map(memory.memoryLine).join('\n') : '(no memory is relevant to that)';
     },
   },
   {
@@ -159,10 +193,21 @@ export function handle(msg, version) {
       return reply({ tools: TOOLS.map(({ run, ...t }) => t) });
     case 'tools/call': {
       const tool = TOOLS.find((t) => t.name === msg.params?.name);
+      const started = Date.now();
+      const call = (extra) => {
+        let project;
+        try {
+          project = core.resolveProject(msg.params?.arguments?.project || undefined);
+        } catch {}
+        logCall({ source: 'mcp', name: String(msg.params?.name), args: JSON.stringify(msg.params?.arguments ?? {}), project, session: project && core.currentSession(project), ms: Date.now() - started, ...extra });
+      };
       try {
         if (!tool) throw new Error(`unknown tool ${msg.params?.name}`);
-        return reply({ content: [{ type: 'text', text: tool.run(msg.params.arguments ?? {}) }] });
+        const text = tool.run(msg.params.arguments ?? {});
+        call({ outChars: text.length });
+        return reply({ content: [{ type: 'text', text }] });
       } catch (err) {
+        call({ ok: false, error: err.message });
         return reply({ content: [{ type: 'text', text: `error: ${err.message}` }], isError: true });
       }
     }

@@ -7,6 +7,7 @@ import path from 'node:path';
 import { addNote, archiveOld, setStatus } from './core.js';
 import { homeDir, open } from './db.js';
 import { projectName, taskLine } from './format.js';
+import { logCall, pruneLog } from './log.js';
 import { dailyReview } from './review.js';
 
 const LABEL = 'com.ctask.tick';
@@ -60,6 +61,7 @@ export function notifyDue({ dryRun = false, log = console.log } = {}) {
     const shown = notify(t);
     // Mark it either way so a machine that cannot show notifications does not retry every minute.
     open().prepare('UPDATE tasks SET notified_at=? WHERE id=?').run(new Date().toISOString(), t.id);
+    logCall({ source: 'tick', name: 'notify', args: `#${t.id} ${t.title}`, project: t.project, ok: shown, error: shown ? undefined : 'notification not shown' });
     log(`${shown ? 'notified' : 'due (no notification shown)'} ${taskLine(t)}`);
   }
 }
@@ -68,6 +70,8 @@ export function tick({ dryRun = false, log = console.log } = {}) {
   notifyDue({ dryRun, log });
   const summary = dailyReview({ dryRun });
   if (summary) log(`${dryRun ? 'would send' : 'sent'} daily review: ${summary}`);
+  if (summary && !dryRun) logCall({ source: 'tick', name: 'review', args: summary });
+  if (!dryRun) pruneLog();
   // Housekeeping: old closed tasks drop out of lists and search (they stay in the database).
   const after = process.env.CTASK_ARCHIVE_AFTER || '30d';
   if (after !== 'off') {
@@ -99,6 +103,7 @@ export function tick({ dryRun = false, log = console.log } = {}) {
     });
     const ok = !res.error && res.status === 0;
     const tail = (res.error?.message || (ok ? res.stdout : res.stderr || res.stdout) || '').trim().slice(-1500);
+    logCall({ source: 'tick', name: 'automation', args: `#${t.id} ${t.title}`, project: t.project, ok, error: ok ? undefined : tail });
     addNote(t.id, `${ok ? 'run ok' : `run FAILED (exit ${res.status ?? 'n/a'})`}: ${tail || '(no output)'}`, {
       type: 'run',
       session: null,

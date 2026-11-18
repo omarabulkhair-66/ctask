@@ -98,3 +98,70 @@ export function playbookText(pb) {
   if (pb.steps.length) out.push('', 'STEPS (each waits on the one before):', ...pb.steps.map((s, i) => `  ${i + 1}. ${s.title}${s.instructions ? ` — ${s.instructions}` : ''}`));
   return out.join('\n');
 }
+
+export function memoryDetailText({ memory: m, history, replaced, recalls }) {
+  const out = [`m${m.id} [${m.kind}]${m.project ? '' : ' (global)'}${m.status === 'active' ? '' : ` — ${m.status}${m.superseded_by ? ` by m${m.superseded_by}` : ''}`}`, m.text, ''];
+  out.push(`importance: ${m.importance} · recalled ${m.uses} time(s)${m.last_used_at ? `, last ${fmtLocal(m.last_used_at)}` : ''}`);
+  if (m.triggers) out.push(`always recalled when the message mentions: ${m.triggers}`);
+  out.push(`created: ${fmtLocal(m.created_at)} · updated: ${fmtLocal(m.updated_at ?? m.created_at)}`);
+  if (recalls.length) out.push(`recalls: ${recalls.map((r) => `${r.n} at ${r.how}`).join(', ')}`);
+  if (history.length) out.push('', 'EARLIER VERSIONS:', ...history.map((h) => `  ${fmtLocal(h.at)}  ${h.text}`));
+  if (replaced.length) out.push('', 'REPLACED:', ...replaced.map((r) => `  m${r.id}  ${r.text}`));
+  return out.join('\n');
+}
+
+export function memoryReviewText(r) {
+  const out = [`${r.total} active memories, ${r.superseded} superseded.`];
+  if (r.duplicates.length) {
+    out.push('', 'POSSIBLE DUPLICATES — merge them: ctask memory merge <mID> <mID> "<combined text>"');
+    for (const d of r.duplicates) out.push(`  ${d.score}%  m${d.a.id}: ${d.a.text}`, `        m${d.b.id}: ${d.b.text}`);
+  }
+  if (r.unused.length) {
+    out.push('', `NEVER RECALLED in ${r.unusedDays}+ days — still true and useful? update, add --when triggers, or forget:`);
+    out.push(...r.unused.slice(0, 20).map((m) => `  m${m.id} [${m.kind}] ${m.text}`));
+  }
+  if (!r.duplicates.length && !r.unused.length) out.push('Nothing to clean up.');
+  return out.join('\n');
+}
+
+export function statsText(s) {
+  const n = (v) => Number(v).toLocaleString('en-US');
+  const out = [`ctask activity, last ${s.days} day(s) — ${s.scope}`, ''];
+  out.push(`Sessions: ${s.sessions} · your messages: ${s.prompts}`);
+  out.push(`Calls logged: ${n(s.calls.total)} (${s.calls.hook} hook, ${s.calls.cli} command, ${s.calls.mcp} MCP, ${s.calls.tick} background) · failed: ${s.errors}`);
+  out.push('', 'WHAT IT PUT IN FRONT OF CLAUDE');
+  out.push(`  Context added: ${n(s.context.chars)} characters (about ${n(s.context.tokens)} tokens), ${s.context.perPrompt} characters per message on average`);
+  out.push(`  Memories shown at session start: ${s.memory.shownAtStart} · recalled mid-conversation: ${s.memory.recalled} (on ${s.memory.promptsWithRecall} of ${s.prompts} messages) · looked up by Claude: ${s.memory.manual}`);
+  out.push(`  Handoffs captured: ${s.handoff.captured} · handoffs shown to a new context: ${s.handoff.shown}`);
+  if (s.memory.top.length) out.push('  Most recalled:', ...s.memory.top.map((m) => `    ${m.n}×  m${m.id} [${m.kind}] ${m.text.length > 90 ? m.text.slice(0, 89) + '…' : m.text}`));
+  out.push('', 'WHAT CLAUDE DID WITH IT');
+  out.push(`  Tasks created: ${s.tasks.created} · closed with evidence: ${s.tasks.done} · progress notes: ${s.tasks.notes} · handoffs written: ${s.tasks.handoffsWritten}`);
+  out.push(`  Memory: ${s.memory.written} saved · ${s.memory.edited} corrected or merged · ${s.memory.forgotten} forgotten`);
+  out.push(`  Files linked to tasks: ${s.files}`);
+  if (s.commands.length) out.push(`  Most used: ${s.commands.map(([k, v]) => `${k} ${v}`).join(', ')}`);
+  out.push('', 'WHERE IT STEPPED IN');
+  out.push(`  Stopped a turn until the task was updated: ${s.guard.stopBlocked}`);
+  out.push(`  Refused "done" without evidence: ${s.guard.noEvidence} · refused a task that was not ready: ${s.guard.waitsOn} · refused a task another session had: ${s.guard.otherSession}`);
+  out.push(`  Refused a duplicate memory: ${s.guard.duplicateMemory} · reminded Claude to save memory: ${s.memory.nudges.standing + s.memory.nudges.checkpoint} (${s.memory.nudges.standing} on a standing instruction, ${s.memory.nudges.checkpoint} checkpoints)`);
+  out.push(`  Background: ${s.tick.notified} reminder notification(s), ${s.tick.automations} automation run(s), ${s.tick.reviews} daily review(s)`);
+  out.push('', 'COST');
+  out.push(`  Hook time: ${s.latency.avg} ms average, ${s.latency.p95} ms at the 95th percentile, ${s.latency.max} ms worst`);
+  if (s.hooks.length) out.push(`  Hooks fired: ${s.hooks.map(([k, v]) => `${k} ${v}`).join(', ')}`);
+  return out.join('\n');
+}
+
+export function logText(rows) {
+  if (!rows.length) return '(no calls logged)';
+  return rows
+    .map((c) => {
+      const bits = [fmtLocal(c.at).slice(5), c.source.padEnd(4), c.name];
+      if (c.args) bits.push(c.args.length > 70 ? c.args.slice(0, 69) + '…' : c.args);
+      const meta = [];
+      if (c.ms != null) meta.push(`${c.ms}ms`);
+      if (c.out_chars) meta.push(`+${c.out_chars} chars`);
+      if (c.detail) meta.push(c.detail.length > 110 ? c.detail.slice(0, 109) + '…' : c.detail);
+      if (!c.ok) meta.push(`FAILED: ${c.error ?? ''}`);
+      return bits.join('  ') + (meta.length ? `  [${meta.join(' · ')}]` : '');
+    })
+    .join('\n');
+}

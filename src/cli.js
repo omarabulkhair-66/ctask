@@ -2,10 +2,11 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as core from './core.js';
 import { dbPath } from './db.js';
-import { pageText, playbookText, projectsText, reviewText, taskDetailText, taskLine, taskList } from './format.js';
+import { logText, memoryDetailText, memoryReviewText, pageText, playbookText, projectsText, reviewText, statsText, taskDetailText, taskLine, taskList } from './format.js';
 import * as links from './links.js';
 import * as memory from './memory.js';
 import * as playbooks from './playbooks.js';
+import { logCall, readLog, stats } from './log.js';
 import { review } from './review.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -37,10 +38,19 @@ Look
   ctask due [--all]             items whose time has come
   ctask projects                open work across every project
   ctask context                 the digest injected at session start
-Memory     (project knowledge shown to every session)
-  ctask remember <text> [--kind rule|decision|gotcha|fact] [--global]
-  ctask memory [words] [--all] [--kind K]
+Memory     (what Claude knows about the project; edited over time, recalled when relevant)
+  ctask remember <text> [--kind rule|preference|decision|gotcha|fact] [--when "words, phrases"]
+                        [--importance 1|2|3] [--replaces mID] [--global] [--force]
+  ctask memory [words] [--all] [--kind K]        list, or search ranked by relevance
+  ctask memory update <mID> [new text] [--kind K] [--when W|none] [--importance N]
+  ctask memory merge <mID> <mID> [...] <combined text>
+  ctask memory show <mID>       versions, what it replaced, how often it was recalled
+  ctask memory review [--all]   duplicates and entries nothing recalls
+  ctask recall <text>           what memory is relevant to this
   ctask forget <mID>
+Insight    (what ctask is doing in your sessions)
+  ctask stats [--days 7] [--all]
+  ctask log [--limit 40] [--source hook|cli|mcp|tick] [--session ID] [--name N] [--failed]
 Code
   ctask link <id> [--file a,b] [--commit SHA] [--branch NAME] [--pr URL]
   ctask why <file> [--all]      tasks that touched a file
@@ -62,7 +72,7 @@ Statuses: todo, in_progress, blocked, waiting (on the user), done, cancelled.
 Add --json to add/list/show/next/due/projects for machine-readable output.
 Data: ${dbPath()}`;
 
-const BOOL = new Set(['force', 'global', 'parallel', 'archived', 'json', 'all', 'due', 'mine', 'closed', 'dry-run', 'help', 'start', 'resume']);
+const BOOL = new Set(['failed', 'force', 'global', 'parallel', 'archived', 'json', 'all', 'due', 'mine', 'closed', 'dry-run', 'help', 'start', 'resume']);
 
 function parse(argv) {
   const pos = [];
@@ -139,12 +149,47 @@ function main(argv) {
       return print(t, taskLine(t));
     }
     case 'remember': {
-      const m = memory.remember({ text: pos.join(' '), kind: opt.kind, project, global: opt.global, session: core.currentSession(project) });
-      return print(m, `remembered ${memory.memoryLine(m)}`);
+      const m = memory.remember({ text: pos.join(' '), kind: opt.kind, project, global: opt.global, session: core.currentSession(project), when: opt.when, importance: opt.importance, replaces: opt.replaces, force: opt.force });
+      return print(m, `remembered ${memory.memoryLine(m)}${opt.replaces ? ` (replaces ${opt.replaces})` : ''}`);
     }
     case 'memory': {
-      const rows = memory.listMemory({ project, all: opt.all, q: pos.join(' '), kind: opt.kind });
+      const [sub, ...more] = pos;
+      const session = core.currentSession(project);
+      if (sub === 'update') {
+        if (!more[0]) throw new Error('usage: ctask memory update <mID> [new text] [--kind K] [--when W] [--importance N]');
+        const m = memory.updateMemory(more[0], { text: more.slice(1).join(' ') || undefined, kind: opt.kind, when: opt.when, importance: opt.importance, global: opt.global ? true : undefined }, { session, project });
+        return print(m, `updated ${memory.memoryLine(m)}`);
+      }
+      if (sub === 'merge') {
+        const ids = [];
+        while (more.length && /^m?\d+$/i.test(more[0])) ids.push(more.shift());
+        const m = memory.mergeMemory(ids, more.join(' '), { session, kind: opt.kind });
+        return print(m, `merged ${ids.join(', ')} into ${memory.memoryLine(m)}`);
+      }
+      if (sub === 'show') {
+        if (!more[0]) throw new Error('usage: ctask memory show <mID>');
+        const d = memory.memoryDetail(more[0]);
+        return print(d, memoryDetailText(d));
+      }
+      if (sub === 'review') {
+        const r = memory.reviewMemory({ project, all: opt.all });
+        return print(r, memoryReviewText(r));
+      }
+      const rows = memory.listMemory({ project, all: opt.all, q: pos.join(' '), kind: opt.kind, status: opt.status ?? 'active' });
       return print(rows, rows.length ? rows.map(memory.memoryLine).join('\n') : '(nothing remembered)');
+    }
+    case 'recall': {
+      if (!pos.length) throw new Error('usage: ctask recall <text>');
+      const hits = memory.recall({ project, text: pos.join(' '), session: core.currentSession(project), how: 'manual' });
+      return print(hits, hits.length ? hits.map(memory.memoryLine).join('\n') : '(no memory is relevant to that)');
+    }
+    case 'stats': {
+      const s = stats({ days: opt.days ? Number(opt.days) : undefined, project, all: opt.all });
+      return print(s, statsText(s));
+    }
+    case 'log': {
+      const rows = readLog({ limit: opt.limit ? Number(opt.limit) : undefined, source: opt.source, name: opt.name, session: opt.session, failed: opt.failed });
+      return print(rows, logText(rows));
     }
     case 'forget': {
       const m = memory.forget(needId());
@@ -251,9 +296,25 @@ function main(argv) {
   }
 }
 
+// Every command is logged (hooks and the MCP server log themselves; the viewers are not worth logging).
+const argv = process.argv.slice(2);
+const logged = argv[0] && !['hook', 'mcp', 'help', '--help', '-h', 'version', '--version', 'log', 'stats', 'context', 'tick', 'daemon'].includes(argv[0]);
+const record = (err) => {
+  if (!logged) return;
+  let project;
+  let session;
+  try {
+    project = core.resolveProject();
+    session = core.currentSession(project);
+  } catch {}
+  const sub = ['memory', 'playbook'].includes(argv[0]) && /^(update|merge|show|review|save|run|list|rm)$/.test(argv[1] ?? '') ? ` ${argv[1]}` : '';
+  logCall({ source: 'cli', name: argv[0] + sub, args: argv.slice(sub ? 2 : 1).join(' '), session, project, ms: process.uptime() * 1000, ok: !err, error: err?.message });
+};
 try {
-  await main(process.argv.slice(2));
+  await main(argv);
+  record();
 } catch (err) {
   console.error(`ctask: ${err.message}`);
   process.exitCode = 1;
+  record(err);
 }
